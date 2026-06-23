@@ -34,7 +34,7 @@ os.makedirs(TMP_DIR, exist_ok=True)
 
 @app.route("/debug-token", methods=["GET"])
 def debug_token():
-    value = config.META_VERIFY_TOK
+    value = config.META_VERIFY_TOKEN
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
