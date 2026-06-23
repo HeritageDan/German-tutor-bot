@@ -31,6 +31,11 @@ os.makedirs(TMP_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 # Webhook verification (Meta calls this once when you set up the webhook URL)
 # ---------------------------------------------------------------------------
+
+@app.route("/debug-token", methods=["GET"])
+def debug_token():
+    value = config.META_VERIFY_TOK
+
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
