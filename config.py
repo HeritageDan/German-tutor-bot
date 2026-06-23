@@ -9,7 +9,7 @@ import os
 # --- Meta WhatsApp Cloud API ---
 META_ACCESS_TOKEN = os.environ.get("EAANyLZAVrAYsBRZCwRMsze0jijbezZCJQc0SYvaK0fF6qg704znYRZCeM6G3uLYtVdP2XY26UqR98lIaaZBXFTuZBGVFYJuIhj0gurqqRt30AKQ61wIB3B1QyUL9PvuHJbMZCsoWYsT6z1fpdsTeAyukHZCYVdWtQWDvPA7Y6tsB5Rzp65ZAohZACsNFBbVe8sGbpZBZAQZDZDMETA_ACCESS_TOKEN")          # Permanent or temporary token from Meta App
 META_PHONE_NUMBER_ID = os.environ.get("1171711162700028")    # The phone number ID (not your actual number) from Meta App
-META_VERIFY_TOKEN = os.environ.get("che-german-tutor-2026OKEN")          # A string YOU choose, used to verify webhook setup
+META_VERIFY_TOKEN = os.environ.get("che-german-tutor-2026")          # A string YOU choose, used to verify webhook setup
 META_API_VERSION = os.environ.get("META_API_VERSION", "v19.0")
 
 # --- Anthropic Claude API ---
