@@ -29,13 +29,21 @@ os.makedirs(TMP_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Webhook verification (Meta calls this once when you set up the webhook URL)
+# TEMPORARY DEBUG ROUTE — remove once webhook verification is confirmed working
 # ---------------------------------------------------------------------------
-
 @app.route("/debug-token", methods=["GET"])
 def debug_token():
     value = config.META_VERIFY_TOKEN
+    return {
+        "value": value,
+        "length": len(value) if value else 0,
+        "is_none": value is None
+    }, 200
 
+
+# ---------------------------------------------------------------------------
+# Webhook verification (Meta calls this once when you first set up the webhook URL)
+# ---------------------------------------------------------------------------
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -101,8 +109,6 @@ def receive_message():
 def send_lesson():
     """
     Expects JSON body: {"session_type": "morning"} or {"session_type": "evening"}
-    Protect this endpoint in production (e.g. with a shared secret header) since
-    it's what pushes the scheduled lesson — see README for a simple way to do that.
     """
     shared_secret = os.environ.get("WEBHOOK_SHARED_SECRET")
     if shared_secret and request.headers.get("X-Webhook-Secret") != shared_secret:
