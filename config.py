@@ -7,9 +7,9 @@ Never hardcode real values here — this file just reads from the environment.
 import os
 
 # --- Meta WhatsApp Cloud API ---
-META_ACCESS_TOKEN = os.environ.get("EAANyLZAVrAYsBRZCwRMsze0jijbezZCJQc0SYvaK0fF6qg704znYRZCeM6G3uLYtVdP2XY26UqR98lIaaZBXFTuZBGVFYJuIhj0gurqqRt30AKQ61wIB3B1QyUL9PvuHJbMZCsoWYsT6z1fpdsTeAyukHZCYVdWtQWDvPA7Y6tsB5Rzp65ZAohZACsNFBbVe8sGbpZBZAQZDZDMETA_ACCESS_TOKEN")          # Permanent or temporary token from Meta App
-META_PHONE_NUMBER_ID = os.environ.get("1171711162700028")    # The phone number ID (not your actual number) from Meta App
-META_VERIFY_TOKEN = os.environ.get("che-german-tutor-2026")          # A string YOU choose, used to verify webhook setup
+META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")          # Permanent or temporary token from Meta App
+META_PHONE_NUMBER_ID = os.environ.get("META_PHONE_NUMBER_ID")    # The phone number ID (not your actual number) from Meta App
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN")          # A string YOU choose, used to verify webhook setup
 META_API_VERSION = os.environ.get("META_API_VERSION", "v19.0")
 
 # --- Anthropic Claude API ---
@@ -22,7 +22,7 @@ AZURE_SPEECH_REGION = os.environ.get("AZURE_SPEECH_REGION")      # e.g. "westeur
 AZURE_GERMAN_VOICE = os.environ.get("AZURE_GERMAN_VOICE", "de-DE-KatjaNeural")
 
 # --- Your own WhatsApp number (so the bot only responds to YOU) ---
-YOUR_WHATSAPP_NUMBER = os.environ.get("237652584398")    # e.g. "2376XXXXXXXX" (no +, no spaces)
+YOUR_WHATSAPP_NUMBER = os.environ.get("YOUR_WHATSAPP_NUMBER")    # e.g. "2376XXXXXXXX" (no +, no spaces)
 
 # --- Storage ---
 # Local JSON file for now. Swap for Supabase later without touching the rest of the app
