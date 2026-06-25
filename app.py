@@ -12,6 +12,7 @@ GitHub Actions calling the /send-lesson endpoint below on a cron schedule.
 
 import os
 import uuid
+import threading
 
 from flask import Flask, request, jsonify
 
@@ -108,7 +109,13 @@ def receive_message():
         whatsapp_client.send_text(from_number, "I can only handle text or voice notes right now!")
         return jsonify({"status": "unsupported_type"}), 200
 
-    handle_conversation_turn(from_number, user_text, session_type="reply")
+# Acknowledge Meta immediately so it doesn't time out and retry the same message.
+    # The actual Claude/TTS work happens in the background after this response is sent.
+    thread = threading.Thread(
+        target=handle_conversation_turn,
+        args=(from_number, user_text, "reply"),
+    )
+    thread.start()
     return jsonify({"status": "ok"}), 200
 
 
