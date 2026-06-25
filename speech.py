@@ -57,7 +57,8 @@ def text_to_speech_ogg(text: str) -> str:
 
 def speech_to_text_from_file(audio_file_path: str) -> str:
     """Transcribes an inbound voice note using the local Whisper model."""
-    segments, _ = _whisper_model.transcribe(audio_file_path, language="de")
+    model = _get_whisper_model()
+    segments, _ = model.transcribe(audio_file_path, language="de")
     text = " ".join(segment.text for segment in segments).strip()
     return text
 
