@@ -1,72 +1,60 @@
 """
-Azure Speech wrapper: text-to-speech (for outbound voice notes) and
-speech-to-text (for transcribing your inbound voice notes).
-
-WhatsApp requires audio in OGG/Opus format, so TTS output gets converted
-via pydub (which needs ffmpeg installed on your server — see README).
+Speech handling:
+- Text-to-Speech via ElevenLabs (free tier, no card required)
+- Speech-to-Text via a self-hosted Whisper model (faster-whisper) — runs locally,
+  no API key, no account, completely free. Slightly slower on Render's free CPU tier.
 """
 
 import os
 import uuid
 
-import azure.cognitiveservices.speech as speechsdk
+import requests
 from pydub import AudioSegment
+from faster_whisper import WhisperModel
 
-from config import AZURE_SPEECH_KEY, AZURE_SPEECH_REGION, AZURE_GERMAN_VOICE
+from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL
 
 TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+# Loaded once at startup, kept in memory — "tiny" keeps RAM usage low enough
+# for Render's free tier (512MB total). First request after a cold start
+# will be slower while the model loads/downloads.
+_whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+
 
 def text_to_speech_ogg(text: str) -> str:
-    """
-    Converts German text to an OGG/Opus audio file ready to send via WhatsApp.
-    Returns the file path.
-    """
-    speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-    speech_config.speech_synthesis_voice_name = AZURE_GERMAN_VOICE
+    """Converts German text to an OGG/Opus audio file ready to send via WhatsApp."""
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
 
-    raw_wav_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.wav")
-    audio_config = speechsdk.audio.AudioOutputConfig(filename=raw_wav_path)
-
-    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-    result = synthesizer.speak_text_async(text).get()
-
-    if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
-        raise RuntimeError(f"TTS failed: {result.reason}")
+    mp3_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp3")
+    with open(mp3_path, "wb") as f:
+        f.write(response.content)
 
     ogg_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.ogg")
-    sound = AudioSegment.from_wav(raw_wav_path)
+    sound = AudioSegment.from_mp3(mp3_path)
     sound.export(ogg_path, format="ogg", codec="libopus")
 
-    os.remove(raw_wav_path)
+    os.remove(mp3_path)
     return ogg_path
 
 
 def speech_to_text_from_file(audio_file_path: str) -> str:
-    """
-    Transcribes an inbound voice note. WhatsApp sends OGG/Opus — Azure STT wants WAV,
-    so we convert first.
-    """
-    wav_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.wav")
-    sound = AudioSegment.from_file(audio_file_path)
-    sound.export(wav_path, format="wav")
-
-    speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-    speech_config.speech_recognition_language = "de-DE"
-    audio_config = speechsdk.audio.AudioConfig(filename=wav_path)
-
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-    result = recognizer.recognize_once()
-
-    os.remove(wav_path)
-
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        return result.text
-    elif result.reason == speechsdk.ResultReason.NoMatch:
-        return ""  # couldn't make out any speech
-    else:
-        raise RuntimeError(f"STT failed: {result.reason}")
+    """Transcribes an inbound voice note using the local Whisper model."""
+    segments, _ = _whisper_model.transcribe(audio_file_path, language="de")
+    text = " ".join(segment.text for segment in segments).strip()
+    return text
 
 
 def cleanup_file(path: str) -> None:
