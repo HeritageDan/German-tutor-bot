@@ -20,8 +20,13 @@ os.makedirs(TMP_DIR, exist_ok=True)
 # Loaded once at startup, kept in memory — "tiny" keeps RAM usage low enough
 # for Render's free tier (512MB total). First request after a cold start
 # will be slower while the model loads/downloads.
-_whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+_whisper_model = None
 
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    return _whisper_model
 
 def text_to_speech_ogg(text: str) -> str:
     """Converts German text to an OGG/Opus audio file ready to send via WhatsApp."""
