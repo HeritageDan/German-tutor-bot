@@ -27,6 +27,10 @@ app = Flask(__name__)
 TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+# Tracks message IDs already processed, to ignore Meta's webhook retries
+# (Meta resends the same message if your app doesn't respond fast enough)
+_PROCESSED_MESSAGE_IDS = set()
+
 
 # ---------------------------------------------------------------------------
 # TEMPORARY DEBUG ROUTE — remove once webhook verification is confirmed working
@@ -73,6 +77,12 @@ def receive_message():
     # Only respond to your own number — ignore everything else
     if config.YOUR_WHATSAPP_NUMBER and from_number != config.YOUR_WHATSAPP_NUMBER:
         return jsonify({"status": "ignored - unknown sender"}), 200
+
+    message_id = parsed.get("id")
+    if message_id:
+        if message_id in _PROCESSED_MESSAGE_IDS:
+            return jsonify({"status": "duplicate_ignored"}), 200
+        _PROCESSED_MESSAGE_IDS.add(message_id)
 
     user_text = None
 
