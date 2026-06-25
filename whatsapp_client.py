@@ -87,19 +87,20 @@ def parse_inbound_message(payload: dict) -> dict | None:
         entry = payload["entry"][0]
         changes = entry["changes"][0]["value"]
         if "messages" not in changes:
-            return None  # this is a status callback (delivered/read), not a new message
+            return None
 
         message = changes["messages"][0]
         from_number = message["from"]
         msg_type = message["type"]
+        message_id = message.get("id")
 
         if msg_type == "text":
-            return {"from": from_number, "type": "text", "text": message["text"]["body"]}
+            return {"from": from_number, "type": "text", "text": message["text"]["body"], "id": message_id}
 
         if msg_type == "audio":
-            return {"from": from_number, "type": "audio", "media_id": message["audio"]["id"]}
+            return {"from": from_number, "type": "audio", "media_id": message["audio"]["id"], "id": message_id}
 
-        return {"from": from_number, "type": msg_type, "raw": message}
+        return {"from": from_number, "type": msg_type, "raw": message, "id": message_id}
 
     except (KeyError, IndexError):
         return None
