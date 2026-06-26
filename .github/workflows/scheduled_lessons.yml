@@ -1,0 +1,25 @@
+name: German Tutor - Scheduled Lessons
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 7:00 AM WAT - morning lesson
+    - cron: "0 18 * * *"  # 7:00 PM WAT - evening review
+  workflow_dispatch: {}
+
+jobs:
+  trigger-lesson:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine session type and call webhook
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" -lt 12 ]; then
+            SESSION_TYPE="morning"
+          else
+            SESSION_TYPE="evening"
+          fi
+
+          curl -X POST "${{ secrets.WEBHOOK_BASE_URL }}/send-lesson" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${{ secrets.WEBHOOK_SHARED_SECRET }}" \
+            -d "{\"session_type\": \"$SESSION_TYPE\"}"
