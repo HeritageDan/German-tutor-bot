@@ -4,6 +4,7 @@ calls Claude, and parses the structured JSON response.
 """
 
 import json
+import re
 import requests
 
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
@@ -73,7 +74,7 @@ ONLY set audio_phrase when the learner EXPLICITLY asks to hear something out lou
 When the learner DOES ask for audio, set audio_phrase to the COMPLETE phrase or sentence they asked for — there is no length limit, do not truncate or shorten it to fit a word count. If they ask you to say a full sentence, the audio must contain that entire sentence.
 
 Keep reply_text natural — e.g. "Here's how it sounds:" — don't apologize or hedge about audio capability.
-                                                                                                                                  
+
 TONE: Warm, encouraging, never condescending. Mix German and English — lean more German as the learner advances tiers. Keep messages SHORT (this is WhatsApp, not an essay).
 
 You must respond ONLY with a single valid JSON object, no markdown formatting, no backticks, no preamble. Structure exactly:
@@ -127,13 +128,21 @@ def call_claude(system_prompt: str, user_message: str, conversation_history: lis
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
-        # Fallback: if parsing fails, at least surface the raw text so nothing silently breaks
+        # Try to salvage a JSON object embedded in extra text, before giving up entirely
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        # Clean fallback — never show raw JSON/text blobs to the learner
         return {
-            "reply_text": raw_text,
+            "reply_text": "Sorry, kleiner Fehler bei mir — kannst du das nochmal sagen? (small glitch, try again?)",
             "respond_with_voice": False,
             "audio_phrase": None,
             "topic_override_change": None,
             "preferred_response_mode_change": None,
             "mistake_detected": None,
-            "tier_progress_note": "PARSE_ERROR - raw text returned as-is",
+            "tier_progress_note": "PARSE_ERROR - fallback used",
         }
