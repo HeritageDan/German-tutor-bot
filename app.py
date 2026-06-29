@@ -90,7 +90,7 @@ def receive_message():
     if parsed["type"] == "text":
         user_text = parsed["text"]
 
-    elif parsed["type"] == "audio":
+  elif parsed["type"] == "audio":
         local_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.ogg")
         try:
             media_url = whatsapp_client.get_media_url(parsed["media_id"])
@@ -103,6 +103,13 @@ def receive_message():
                     "(Couldn't quite make that out, try again?)"
                 )
                 return jsonify({"status": "stt_no_match"}), 200
+        except Exception as e:
+            print(f"AUDIO PROCESSING ERROR: {e}")
+            whatsapp_client.send_text(
+                from_number,
+                "Sorry, I had trouble processing that voice note — try again?"
+            )
+            return jsonify({"status": "audio_processing_error"}), 200
         finally:
             speech.cleanup_file(local_path)
     else:
