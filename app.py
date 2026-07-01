@@ -71,11 +71,10 @@ def receive_message():
 
     parsed = whatsapp_client.parse_inbound_message(payload)
     if parsed is None:
-        return jsonify({"status": "ignored"}), 200  # status callback, not a real message
+        return jsonify({"status": "ignored"}), 200
 
     from_number = parsed["from"]
 
-    # Only respond to your own number — ignore everything else
     if config.YOUR_WHATSAPP_NUMBER and from_number != config.YOUR_WHATSAPP_NUMBER:
         return jsonify({"status": "ignored - unknown sender"}), 200
 
@@ -90,7 +89,7 @@ def receive_message():
     if parsed["type"] == "text":
         user_text = parsed["text"]
 
-  elif parsed["type"] == "audio":
+    elif parsed["type"] == "audio":
         local_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.ogg")
         try:
             media_url = whatsapp_client.get_media_url(parsed["media_id"])
@@ -112,12 +111,11 @@ def receive_message():
             return jsonify({"status": "audio_processing_error"}), 200
         finally:
             speech.cleanup_file(local_path)
+
     else:
         whatsapp_client.send_text(from_number, "I can only handle text or voice notes right now!")
         return jsonify({"status": "unsupported_type"}), 200
 
-# Acknowledge Meta immediately so it doesn't time out and retry the same message.
-    # The actual Claude/TTS work happens in the background after this response is sent.
     thread = threading.Thread(
         target=handle_conversation_turn,
         args=(from_number, user_text, "reply"),
