@@ -75,8 +75,6 @@ def receive_message():
 
     from_number = parsed["from"]
 
-    if config.YOUR_WHATSAPP_NUMBER and from_number != config.YOUR_WHATSAPP_NUMBER:
-        return jsonify({"status": "ignored - unknown sender"}), 200
 
     message_id = parsed.get("id")
     if message_id:
@@ -156,7 +154,7 @@ def send_lesson():
 # ---------------------------------------------------------------------------
 def handle_conversation_turn(to_number: str, user_message: str, session_type: str,
                               is_scheduled_push: bool = False) -> None:
-    progress = storage.get_progress()
+    progress = storage.get_progress(to_number)
 
     system_prompt = build_system_prompt(progress, session_type)
 
@@ -206,7 +204,7 @@ def handle_conversation_turn(to_number: str, user_message: str, session_type: st
     # Update rolling conversation history and persist everything
     storage.append_history(progress, "user", user_message)
     storage.append_history(progress, "assistant", reply_text)
-    storage.save_progress(progress)
+    storage.save_progress(to_number, progress)
 
 
 if __name__ == "__main__":
