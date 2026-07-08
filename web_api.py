@@ -7,6 +7,7 @@ All endpoints return JSON. Auth is via Bearer token in the Authorization header.
 
 import os
 import uuid
+import base64
 
 from flask import Blueprint, request, jsonify, send_file
 
@@ -130,15 +131,15 @@ def chat():
             progress["current_tier"] = get_next_tier(progress["current_tier"])
             progress["sessions_on_current_tier"] = 0
 
-    # Generate audio if requested
-    audio_url = None
+    # Generate audio if requested — return as base64 data URI (avoids disk persistence issues)
+    audio_data = None
     if audio_phrase:
         try:
             ogg_path = speech.text_to_speech_ogg(audio_phrase)
-            audio_filename = f"{uuid.uuid4()}.ogg"
-            final_path = os.path.join(AUDIO_DIR, audio_filename)
-            os.rename(ogg_path, final_path)
-            audio_url = f"/api/audio/{audio_filename}"
+            with open(ogg_path, "rb") as f:
+                audio_bytes = f.read()
+            audio_data = "data:audio/ogg;base64," + base64.b64encode(audio_bytes).decode()
+            speech.cleanup_file(ogg_path)
         except Exception as e:
             print(f"TTS error in web chat: {e}")
 
@@ -149,8 +150,10 @@ def chat():
 
     return jsonify({
         "reply": reply_text,
-        "audio_url": audio_url,
+        "audio_data": audio_data,
         "current_tier": progress["current_tier"],
+        "sessions_on_tier": progress["sessions_on_current_tier"],
+        "streak": _calculate_streak(progress),
     }), 200
 
 
