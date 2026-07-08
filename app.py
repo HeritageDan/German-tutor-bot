@@ -1,13 +1,7 @@
 """
-Main Flask app — the webhook listener.
-
-Two responsibilities:
-1. GET /webhook  - Meta's verification handshake when you first connect the webhook
-2. POST /webhook - receives every inbound WhatsApp message (text or voice) from you,
-                    runs it through Claude, sends back a response (text or voice)
-
-Morning/evening SCHEDULED lessons are NOT triggered from here — those come from
-GitHub Actions calling the /send-lesson endpoint below on a cron schedule.
+Main Flask app — handles both:
+1. WhatsApp webhook (inbound messages from Meta)
+2. Web API (chat, auth, progress for the HTML/JS frontend)
 """
 
 import os
@@ -22,20 +16,40 @@ import whatsapp_client
 import speech
 from tutor_brain import build_system_prompt, call_claude
 from roadmap import get_next_tier
+from web_api import api  # web frontend blueprint
 
 app = Flask(__name__)
+
+# Register the web API blueprint (all routes prefixed with /api)
+app.register_blueprint(api)
 
 TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# Tracks message IDs already processed, to ignore Meta's webhook retries
-# (Meta resends the same message if your app doesn't respond fast enough)
+# Tracks message IDs already processed to ignore Meta's webhook retries
 _PROCESSED_MESSAGE_IDS = set()
 
 
 # ---------------------------------------------------------------------------
-# TEMPORARY DEBUG ROUTE — remove once webhook verification is confirmed working
+# CORS — allow the frontend (any origin for now) to call the API
 # ---------------------------------------------------------------------------
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+@app.route("/api/<path:path>", methods=["OPTIONS"])
+def handle_options(path):
+    return "", 204
+
+
+# ---------------------------------------------------------------------------
+# Debug route (remove once confirmed working)
+# ---------------------------------------------------------------------------
+
 @app.route("/debug-token", methods=["GET"])
 def debug_token():
     value = config.META_VERIFY_TOKEN
@@ -47,8 +61,9 @@ def debug_token():
 
 
 # ---------------------------------------------------------------------------
-# Webhook verification (Meta calls this once when you first set up the webhook URL)
+# Webhook verification (Meta handshake)
 # ---------------------------------------------------------------------------
+
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -61,8 +76,9 @@ def verify_webhook():
 
 
 # ---------------------------------------------------------------------------
-# Inbound messages (every reply you send, text or voice)
+# Inbound WhatsApp messages
 # ---------------------------------------------------------------------------
+
 @app.route("/webhook", methods=["POST"])
 def receive_message():
     payload = request.get_json(silent=True)
@@ -74,7 +90,6 @@ def receive_message():
         return jsonify({"status": "ignored"}), 200
 
     from_number = parsed["from"]
-
 
     message_id = parsed.get("id")
     if message_id:
@@ -123,13 +138,11 @@ def receive_message():
 
 
 # ---------------------------------------------------------------------------
-# Scheduled lessons (called by GitHub Actions cron — see github_actions/ folder)
+# Scheduled lessons (called by cron-job.org)
 # ---------------------------------------------------------------------------
+
 @app.route("/send-lesson", methods=["POST"])
 def send_lesson():
-    """
-    Expects JSON body: {"session_type": "morning"} or {"session_type": "evening"}
-    """
     shared_secret = os.environ.get("WEBHOOK_SHARED_SECRET")
     if shared_secret and request.headers.get("X-Webhook-Secret") != shared_secret:
         return jsonify({"error": "unauthorized"}), 401
@@ -150,12 +163,12 @@ def send_lesson():
 
 
 # ---------------------------------------------------------------------------
-# Core orchestration logic — shared by both inbound replies and scheduled lessons
+# Core orchestration — shared by WhatsApp inbound + scheduled lessons
 # ---------------------------------------------------------------------------
+
 def handle_conversation_turn(to_number: str, user_message: str, session_type: str,
                               is_scheduled_push: bool = False) -> None:
     progress = storage.get_progress(to_number)
-
     system_prompt = build_system_prompt(progress, session_type)
 
     claude_response = call_claude(
@@ -172,7 +185,6 @@ def handle_conversation_turn(to_number: str, user_message: str, session_type: st
     mistake = claude_response.get("mistake_detected")
     progress_note = claude_response.get("tier_progress_note")
 
-    # Apply any in-conversation commands the learner issued
     if topic_override_change:
         progress["topic_override"] = topic_override_change
     if mode_change in ("text", "voice"):
@@ -185,23 +197,21 @@ def handle_conversation_turn(to_number: str, user_message: str, session_type: st
             progress["current_tier"] = get_next_tier(progress["current_tier"])
             progress["sessions_on_current_tier"] = 0
 
-    # Decide final response mode: explicit per-message flag wins, else the standing preference
     should_send_voice = respond_with_voice or progress["preferred_response_mode"] == "voice"
 
-    # Always send the text first (so you have it in writing too)
     whatsapp_client.send_text(to_number, reply_text)
 
-    # Send a voice note if flagged, using either the tutor's chosen phrase or the full reply
     phrase_to_voice = audio_phrase if audio_phrase else (reply_text if should_send_voice else None)
     if phrase_to_voice:
         audio_path = None
         try:
             audio_path = speech.text_to_speech_ogg(phrase_to_voice)
             whatsapp_client.send_audio(to_number, audio_path)
+        except Exception as e:
+            print(f"TTS/audio send error: {e}")
         finally:
             speech.cleanup_file(audio_path)
 
-    # Update rolling conversation history and persist everything
     storage.append_history(progress, "user", user_message)
     storage.append_history(progress, "assistant", reply_text)
     storage.save_progress(to_number, progress)
