@@ -1,15 +1,13 @@
 """
-Web API routes — mounted onto the existing Flask app in app.py.
-These serve the HTML/JS frontend, completely separate from the WhatsApp webhook.
-
-All endpoints return JSON. Auth is via Bearer token in the Authorization header.
+Web API routes for the HTML/JS frontend.
+All endpoints return JSON. Auth via Bearer token in Authorization header.
 """
 
+import base64
 import os
 import uuid
-import base64
 
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify
 
 import auth
 import storage
@@ -21,34 +19,21 @@ api = Blueprint("api", __name__, url_prefix="/api")
 
 TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
-AUDIO_DIR = "web_audio"
-os.makedirs(AUDIO_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-
-def _get_current_user():
-    """Extracts and verifies the Bearer token from the request. Returns payload or None."""
-    header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer "):
-        return None
-    token = header[7:]
-    return auth.verify_token(token)
-
+# ── Auth helpers ────────────────────────────────────────────────────────────
 
 def _require_auth():
-    """Returns (user_payload, None) or (None, error_response)."""
-    user = _get_current_user()
-    if not user:
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
         return None, (jsonify({"error": "Unauthorized — please log in."}), 401)
+    user = auth.verify_token(header[7:])
+    if not user:
+        return None, (jsonify({"error": "Session expired — please log in again."}), 401)
     return user, None
 
 
-# ---------------------------------------------------------------------------
-# Auth endpoints
-# ---------------------------------------------------------------------------
+# ── Auth endpoints ───────────────────────────────────────────────────────────
 
 @api.route("/signup", methods=["POST"])
 def signup():
@@ -56,12 +41,10 @@ def signup():
     email = body.get("email", "").strip()
     password = body.get("password", "")
     display_name = body.get("display_name", "").strip() or email.split("@")[0]
-
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters."}), 400
-
     result = auth.signup(email, password, display_name)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 409
@@ -73,19 +56,15 @@ def login():
     body = request.get_json(silent=True) or {}
     email = body.get("email", "").strip()
     password = body.get("password", "")
-
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
-
     result = auth.login(email, password)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 401
     return jsonify({"token": result["token"], "user": result["user"]}), 200
 
 
-# ---------------------------------------------------------------------------
-# Chat endpoint — the core of the web app
-# ---------------------------------------------------------------------------
+# ── Chat endpoint ────────────────────────────────────────────────────────────
 
 @api.route("/chat", methods=["POST"])
 def chat():
@@ -100,7 +79,6 @@ def chat():
     if not user_message:
         return jsonify({"error": "Message cannot be empty."}), 400
 
-    # Use email as the unique key for progress (consistent with multi-user storage)
     user_id = user["email"]
     progress = storage.get_progress(user_id)
 
@@ -118,7 +96,6 @@ def chat():
     mistake = claude_response.get("mistake_detected")
     progress_note = claude_response.get("tier_progress_note")
 
-    # Apply any command/state changes
     if topic_override_change:
         progress["topic_override"] = topic_override_change
     if mode_change in ("text", "voice"):
@@ -131,19 +108,14 @@ def chat():
             progress["current_tier"] = get_next_tier(progress["current_tier"])
             progress["sessions_on_current_tier"] = 0
 
-    # Generate audio if requested — return as base64 data URI (avoids disk persistence issues)
+    # Use MP3 base64 for web (not OGG — OGG doesn't work in Safari/iOS)
     audio_data = None
     if audio_phrase:
         try:
-            ogg_path = speech.text_to_speech_ogg(audio_phrase)
-            with open(ogg_path, "rb") as f:
-                audio_bytes = f.read()
-            audio_data = "data:audio/ogg;base64," + base64.b64encode(audio_bytes).decode()
-            speech.cleanup_file(ogg_path)
+            audio_data = speech.text_to_speech_mp3_base64(audio_phrase)
         except Exception as e:
             print(f"TTS error in web chat: {e}")
 
-    # Update conversation history and persist
     storage.append_history(progress, "user", user_message)
     storage.append_history(progress, "assistant", reply_text)
     storage.save_progress(user_id, progress)
@@ -157,25 +129,48 @@ def chat():
     }), 200
 
 
-# ---------------------------------------------------------------------------
-# Audio file serving
-# ---------------------------------------------------------------------------
+# ── Voice transcription endpoint (browser mic → Whisper → text) ──────────────
 
-@api.route("/audio/<filename>", methods=["GET"])
-def serve_audio(filename):
-    """Serves generated voice note files to the frontend."""
-    # Basic security: only allow simple filenames, no path traversal
-    if "/" in filename or ".." in filename:
-        return jsonify({"error": "Invalid filename."}), 400
-    path = os.path.join(AUDIO_DIR, filename)
-    if not os.path.exists(path):
-        return jsonify({"error": "Audio file not found."}), 404
-    return send_file(path, mimetype="audio/ogg")
+@api.route("/transcribe", methods=["POST"])
+def transcribe():
+    """
+    Receives a base64-encoded audio blob from the browser MediaRecorder,
+    transcribes it with Whisper, and returns the text.
+    The frontend then sends that text as a normal /api/chat message.
+    """
+    user, err = _require_auth()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    audio_b64 = body.get("audio_data", "")
+    mime_type = body.get("mime_type", "audio/webm")
+
+    if not audio_b64:
+        return jsonify({"error": "No audio data provided."}), 400
+
+    # Strip data URI prefix if present (e.g. "data:audio/webm;base64,...")
+    if "," in audio_b64:
+        audio_b64 = audio_b64.split(",", 1)[1]
+
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+    except Exception:
+        return jsonify({"error": "Invalid audio data — could not decode base64."}), 400
+
+    try:
+        transcript = speech.speech_to_text_from_bytes(audio_bytes, mime_type)
+    except Exception as e:
+        print(f"STT error: {e}")
+        return jsonify({"error": "Could not transcribe audio — please try again."}), 500
+
+    if not transcript.strip():
+        return jsonify({"error": "No speech detected — please try again."}), 200
+
+    return jsonify({"transcript": transcript.strip()}), 200
 
 
-# ---------------------------------------------------------------------------
-# Progress endpoint
-# ---------------------------------------------------------------------------
+# ── Progress endpoint ────────────────────────────────────────────────────────
 
 @api.route("/progress", methods=["GET"])
 def get_progress_api():
@@ -183,9 +178,7 @@ def get_progress_api():
     if err:
         return err
 
-    user_id = user["email"]
-    progress = storage.get_progress(user_id)
-
+    progress = storage.get_progress(user["email"])
     return jsonify({
         "current_tier": progress["current_tier"],
         "sessions_on_current_tier": progress["sessions_on_current_tier"],
@@ -198,7 +191,6 @@ def get_progress_api():
 
 
 def _calculate_streak(progress: dict) -> int:
-    """Counts consecutive days with at least one mastery signal."""
     from datetime import date, timedelta
     if not progress["mastery_signals"]:
         return 0
