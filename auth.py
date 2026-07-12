@@ -1,10 +1,6 @@
 """
-Simple JWT-based auth.
-Users are stored as JSON files in users/ directory (same pattern as progress storage).
-Swap to Supabase later by only rewriting load_user() and save_user().
-
-Future paid tier: add a 'plan' field ('free' | 'pro') to the user record.
-Check it in /api/chat to gate features (e.g. voice notes, lesson history).
+JWT-based auth with Supabase user storage.
+Falls back to local JSON files if SUPABASE_URL is not set.
 """
 
 import json
@@ -14,23 +10,49 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
+import requests
 
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "change-this-in-production")
 TOKEN_EXPIRY_DAYS = 30
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
+
 USERS_DIR = os.environ.get("USERS_DIR", "users")
-os.makedirs(USERS_DIR, exist_ok=True)
+if not USE_SUPABASE:
+    os.makedirs(USERS_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# User storage
-# ---------------------------------------------------------------------------
+def _sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
-def _user_path(email: str) -> str:
-    safe = email.lower().replace("@", "_at_").replace(".", "_")
-    return os.path.join(USERS_DIR, f"user_{safe}.json")
+
+def _sb_url(filters: str = "") -> str:
+    return f"{SUPABASE_URL}/rest/v1/users{filters}"
 
 
-def load_user(email: str) -> dict | None:
+# ── Load / save user ────────────────────────────────────────────────────────
+
+def _load_user(email: str) -> dict | None:
+    if USE_SUPABASE:
+        try:
+            resp = requests.get(
+                _sb_url(f"?email=eq.{email.lower()}&limit=1"),
+                headers=_sb_headers(), timeout=10
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
+        except Exception as e:
+            print(f"Supabase load_user error: {e}")
+            return None
+    # JSON fallback
     path = _user_path(email)
     if not os.path.exists(path):
         return None
@@ -38,22 +60,34 @@ def load_user(email: str) -> dict | None:
         return json.load(f)
 
 
-def save_user(user: dict) -> None:
+def _save_user(user: dict) -> None:
+    if USE_SUPABASE:
+        try:
+            resp = requests.post(
+                _sb_url(),
+                headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+                json=user, timeout=10
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"Supabase save_user error: {e}")
+        return
     path = _user_path(user["email"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(user, f, ensure_ascii=False, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Signup / Login
-# ---------------------------------------------------------------------------
+def _user_path(email: str) -> str:
+    safe = email.lower().replace("@", "_at_").replace(".", "_")
+    return os.path.join(USERS_DIR, f"user_{safe}.json")
 
-def signup(email: str, password: str, display_name: str) -> dict:
-    """
-    Creates a new user. Returns {"ok": True, "token": ...} or {"ok": False, "error": ...}
-    """
+
+# ── Signup / Login ──────────────────────────────────────────────────────────
+
+def signup(email: str, password: str, display_name: str,
+           native_language: str = "English", target_language: str = "German") -> dict:
     email = email.lower().strip()
-    if load_user(email):
+    if _load_user(email):
         return {"ok": False, "error": "An account with this email already exists."}
 
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -63,45 +97,39 @@ def signup(email: str, password: str, display_name: str) -> dict:
         "display_name": display_name,
         "password_hash": hashed,
         "plan": "free",
+        "native_language": native_language,
+        "target_language": target_language,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    save_user(user)
-    token = _generate_token(user)
-    return {"ok": True, "token": token, "user": _public_user(user)}
+    _save_user(user)
+    return {"ok": True, "token": _generate_token(user), "user": _public_user(user)}
 
 
 def login(email: str, password: str) -> dict:
-    """
-    Returns {"ok": True, "token": ...} or {"ok": False, "error": ...}
-    """
     email = email.lower().strip()
-    user = load_user(email)
+    user = _load_user(email)
     if not user:
         return {"ok": False, "error": "No account found with this email."}
-
     if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return {"ok": False, "error": "Incorrect password."}
-
-    token = _generate_token(user)
-    return {"ok": True, "token": token, "user": _public_user(user)}
+    return {"ok": True, "token": _generate_token(user), "user": _public_user(user)}
 
 
-# ---------------------------------------------------------------------------
-# Token helpers
-# ---------------------------------------------------------------------------
+# ── Token helpers ───────────────────────────────────────────────────────────
 
 def _generate_token(user: dict) -> str:
     payload = {
         "user_id": user["id"],
         "email": user["email"],
         "plan": user["plan"],
+        "native_language": user.get("native_language", "English"),
+        "target_language": user.get("target_language", "German"),
         "exp": datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRY_DAYS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 
 def verify_token(token: str) -> dict | None:
-    """Returns the decoded payload dict, or None if invalid/expired."""
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
     except jwt.PyJWTError:
@@ -109,5 +137,4 @@ def verify_token(token: str) -> dict | None:
 
 
 def _public_user(user: dict) -> dict:
-    """Strip the password hash before sending user data to the frontend."""
     return {k: v for k, v in user.items() if k != "password_hash"}
