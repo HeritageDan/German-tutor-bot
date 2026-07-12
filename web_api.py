@@ -1,18 +1,17 @@
 """
 Web API routes for the HTML/JS frontend.
-All endpoints return JSON. Auth via Bearer token in Authorization header.
+Auth via Bearer token. All endpoints return JSON.
 """
 
 import base64
 import os
-import uuid
 
 from flask import Blueprint, request, jsonify
 
 import auth
 import storage
 import speech
-from tutor_brain import build_system_prompt, call_claude
+from tutor_brain import build_system_prompt, call_claude, SUPPORTED_LANGUAGES
 from roadmap import get_next_tier
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -21,19 +20,17 @@ TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
 
 
-# ── Auth helpers ────────────────────────────────────────────────────────────
-
 def _require_auth():
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
-        return None, (jsonify({"error": "Unauthorized — please log in."}), 401)
+        return None, (jsonify({"error": "Unauthorized"}), 401)
     user = auth.verify_token(header[7:])
     if not user:
         return None, (jsonify({"error": "Session expired — please log in again."}), 401)
     return user, None
 
 
-# ── Auth endpoints ───────────────────────────────────────────────────────────
+# ── Auth ─────────────────────────────────────────────────────────────────────
 
 @api.route("/signup", methods=["POST"])
 def signup():
@@ -41,11 +38,15 @@ def signup():
     email = body.get("email", "").strip()
     password = body.get("password", "")
     display_name = body.get("display_name", "").strip() or email.split("@")[0]
+    native_language = body.get("native_language", "English")
+    target_language = body.get("target_language", "German")
+
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters."}), 400
-    result = auth.signup(email, password, display_name)
+
+    result = auth.signup(email, password, display_name, native_language, target_language)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 409
     return jsonify({"token": result["token"], "user": result["user"]}), 201
@@ -64,7 +65,28 @@ def login():
     return jsonify({"token": result["token"], "user": result["user"]}), 200
 
 
-# ── Chat endpoint ────────────────────────────────────────────────────────────
+@api.route("/languages", methods=["GET"])
+def get_languages():
+    """Returns the list of supported languages for the onboarding UI."""
+    return jsonify({"languages": SUPPORTED_LANGUAGES}), 200
+
+
+@api.route("/set-languages", methods=["POST"])
+def set_languages():
+    """Called during onboarding to set/change the user's language pair."""
+    user, err = _require_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    native = body.get("native_language", "English")
+    target = body.get("target_language", "German")
+    if target not in SUPPORTED_LANGUAGES:
+        return jsonify({"error": f"Unsupported language: {target}"}), 400
+    storage.set_user_languages(user["email"], native, target)
+    return jsonify({"ok": True}), 200
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────────
 
 @api.route("/chat", methods=["POST"])
 def chat():
@@ -75,14 +97,27 @@ def chat():
     body = request.get_json(silent=True) or {}
     user_message = body.get("message", "").strip()
     session_type = body.get("session_type", "reply")
-
     if not user_message:
         return jsonify({"error": "Message cannot be empty."}), 400
 
     user_id = user["email"]
     progress = storage.get_progress(user_id)
 
-    system_prompt = build_system_prompt(progress, session_type)
+    # Get the user's language pair (from token or Supabase)
+    native_language = user.get("native_language", "English")
+    target_language = user.get("target_language", "German")
+
+    # Also check Supabase in case it was updated after token was issued
+    try:
+        langs = storage.get_user_languages(user_id)
+        native_language = langs.get("native_language", native_language)
+        target_language = langs.get("target_language", target_language)
+    except Exception:
+        pass
+
+    system_prompt = build_system_prompt(
+        progress, session_type, native_language, target_language
+    )
     claude_response = call_claude(
         system_prompt=system_prompt,
         user_message=user_message,
@@ -94,7 +129,7 @@ def chat():
     topic_override_change = claude_response.get("topic_override_change")
     mode_change = claude_response.get("preferred_response_mode_change")
     mistake = claude_response.get("mistake_detected")
-    progress_note = claude_response.get("tier_progress_note")
+    progress_note = claude_response.get("tier_progress_note", "")
 
     if topic_override_change:
         progress["topic_override"] = topic_override_change
@@ -108,13 +143,13 @@ def chat():
             progress["current_tier"] = get_next_tier(progress["current_tier"])
             progress["sessions_on_current_tier"] = 0
 
-    # Use MP3 base64 for web (not OGG — OGG doesn't work in Safari/iOS)
+    # MP3 for web (universally supported)
     audio_data = None
     if audio_phrase:
         try:
             audio_data = speech.text_to_speech_mp3_base64(audio_phrase)
         except Exception as e:
-            print(f"TTS error in web chat: {e}")
+            print(f"TTS error: {e}")
 
     storage.append_history(progress, "user", user_message)
     storage.append_history(progress, "assistant", reply_text)
@@ -126,18 +161,14 @@ def chat():
         "current_tier": progress["current_tier"],
         "sessions_on_tier": progress["sessions_on_current_tier"],
         "streak": _calculate_streak(progress),
+        "target_language": target_language,
     }), 200
 
 
-# ── Voice transcription endpoint (browser mic → Whisper → text) ──────────────
+# ── Voice transcription ───────────────────────────────────────────────────────
 
 @api.route("/transcribe", methods=["POST"])
 def transcribe():
-    """
-    Receives a base64-encoded audio blob from the browser MediaRecorder,
-    transcribes it with Whisper, and returns the text.
-    The frontend then sends that text as a normal /api/chat message.
-    """
     user, err = _require_auth()
     if err:
         return err
@@ -145,24 +176,21 @@ def transcribe():
     body = request.get_json(silent=True) or {}
     audio_b64 = body.get("audio_data", "")
     mime_type = body.get("mime_type", "audio/webm")
-
     if not audio_b64:
         return jsonify({"error": "No audio data provided."}), 400
 
-    # Strip data URI prefix if present (e.g. "data:audio/webm;base64,...")
     if "," in audio_b64:
         audio_b64 = audio_b64.split(",", 1)[1]
-
     try:
         audio_bytes = base64.b64decode(audio_b64)
     except Exception:
-        return jsonify({"error": "Invalid audio data — could not decode base64."}), 400
+        return jsonify({"error": "Invalid audio data."}), 400
 
     try:
         transcript = speech.speech_to_text_from_bytes(audio_bytes, mime_type)
     except Exception as e:
         print(f"STT error: {e}")
-        return jsonify({"error": "Could not transcribe audio — please try again."}), 500
+        return jsonify({"error": "Could not transcribe audio."}), 500
 
     if not transcript.strip():
         return jsonify({"error": "No speech detected — please try again."}), 200
@@ -170,7 +198,7 @@ def transcribe():
     return jsonify({"transcript": transcript.strip()}), 200
 
 
-# ── Progress endpoint ────────────────────────────────────────────────────────
+# ── Progress ──────────────────────────────────────────────────────────────────
 
 @api.route("/progress", methods=["GET"])
 def get_progress_api():
@@ -179,6 +207,8 @@ def get_progress_api():
         return err
 
     progress = storage.get_progress(user["email"])
+    langs = storage.get_user_languages(user["email"])
+
     return jsonify({
         "current_tier": progress["current_tier"],
         "sessions_on_current_tier": progress["sessions_on_current_tier"],
@@ -187,6 +217,8 @@ def get_progress_api():
         "recent_mistakes": progress["mistake_log"][-3:],
         "topic_override": progress.get("topic_override"),
         "streak": _calculate_streak(progress),
+        "native_language": langs.get("native_language", "English"),
+        "target_language": langs.get("target_language", "German"),
     }), 200
 
 
