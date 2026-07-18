@@ -6,7 +6,7 @@ Falls back to local JSON files if SUPABASE_URL is not set.
 import json
 import os
 import requests
-from datetime import date
+from datetime import date, datetime, timezone
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -69,17 +69,19 @@ def get_progress(user_email: str) -> dict:
                 "conversation_history": r.get("conversation_history") or [],
                 "total_xp": r.get("total_xp", 0),
             }
+        # No row yet — create one
         fresh = DEFAULT_PROGRESS.copy()
         save_progress(user_email, fresh)
         return fresh
     except Exception as e:
-        print(f"Supabase get_progress error: {e}")
+        print(f"[storage] get_progress error: {e}")
         return DEFAULT_PROGRESS.copy()
 
 
 def save_progress(user_email: str, progress: dict) -> None:
     if not USE_SUPABASE:
         return _json_save(user_email, progress)
+    # Use a proper ISO timestamp — not the string "now()" which Supabase rejects
     data = {
         "user_email": user_email,
         "current_tier": progress.get("current_tier", "A1.1"),
@@ -93,16 +95,18 @@ def save_progress(user_email: str, progress: dict) -> None:
         "preferred_response_mode": progress.get("preferred_response_mode", "text"),
         "conversation_history": progress.get("conversation_history", []),
         "total_xp": progress.get("total_xp", 0),
-        "updated_at": "now()",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        requests.post(
+        resp = requests.post(
             _sb_url("user_progress"),
             headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
             json=data, timeout=10
-        ).raise_for_status()
+        )
+        if not resp.ok:
+            print(f"[storage] save_progress HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        print(f"Supabase save_progress error: {e}")
+        print(f"[storage] save_progress error: {e}")
 
 
 def get_user_languages(user_email: str) -> dict:
@@ -121,7 +125,7 @@ def get_user_languages(user_email: str) -> dict:
                 "target_language": rows[0].get("target_language", "German"),
             }
     except Exception as e:
-        print(f"Supabase get_user_languages error: {e}")
+        print(f"[storage] get_user_languages error: {e}")
     return {"native_language": "English", "target_language": "German"}
 
 
@@ -129,17 +133,21 @@ def set_user_languages(user_email: str, native_language: str, target_language: s
     if not USE_SUPABASE:
         return False
     try:
-        requests.patch(
+        resp = requests.patch(
             _sb_url("users", f"?email=eq.{user_email}"),
             headers={**_sb_headers(), "Prefer": "return=minimal"},
             json={"native_language": native_language, "target_language": target_language},
             timeout=10
-        ).raise_for_status()
+        )
+        if not resp.ok:
+            print(f"[storage] set_user_languages HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+        # Reset progress to A1.1 for new language
         fresh = DEFAULT_PROGRESS.copy()
         save_progress(user_email, fresh)
         return True
     except Exception as e:
-        print(f"Supabase set_user_languages error: {e}")
+        print(f"[storage] set_user_languages error: {e}")
         return False
 
 
@@ -163,14 +171,14 @@ def record_mastery_signal(progress: dict, signal: str) -> dict:
 def add_vocab(progress: dict, words: list) -> dict:
     existing = set(progress.get("vocab_introduced", []))
     for w in words:
-        if w not in existing:
+        if w and w not in existing:
             progress["vocab_introduced"].append(w)
             existing.add(w)
     return progress
 
 
 def add_xp(progress: dict, xp: int) -> dict:
-    progress["total_xp"] = progress.get("total_xp", 0) + max(0, xp)
+    progress["total_xp"] = progress.get("total_xp", 0) + max(0, int(xp))
     return progress
 
 
@@ -178,6 +186,8 @@ def increment_session_count(progress: dict) -> dict:
     progress["session_count"] = progress.get("session_count", 0) + 1
     return progress
 
+
+# ── JSON fallback (local dev only) ──────────────────────────────────────────
 
 def _progress_path(email: str) -> str:
     safe = email.replace("@", "_at_").replace(".", "_")
