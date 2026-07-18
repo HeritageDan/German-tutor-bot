@@ -1,5 +1,5 @@
 """
-Web API routes — all endpoints the frontend calls.
+Web API routes for the HTML/JS frontend.
 Auth via Bearer token in Authorization header.
 """
 
@@ -20,7 +20,7 @@ TMP_DIR = "tmp_audio"
 os.makedirs(TMP_DIR, exist_ok=True)
 
 
-# ── Auth helpers ─────────────────────────────────────────────────────────────
+# ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def _require_auth():
     header = request.headers.get("Authorization", "")
@@ -32,8 +32,7 @@ def _require_auth():
     return user, None
 
 
-def _get_languages(user_email: str, token_payload: dict) -> tuple[str, str]:
-    """Get native/target language, preferring Supabase over token."""
+def _get_languages(user_email: str, token_payload: dict) -> tuple:
     try:
         langs = storage.get_user_languages(user_email)
         return langs.get("native_language", "English"), langs.get("target_language", "German")
@@ -42,7 +41,6 @@ def _get_languages(user_email: str, token_payload: dict) -> tuple[str, str]:
 
 
 def _build_state(progress: dict, native_lang: str, target_lang: str) -> dict:
-    """Build the sidebar state object returned by multiple endpoints."""
     tier_code = progress["current_tier"]
     tier_info = TIERS.get(tier_code, {})
     mastery_pct = min(100, progress.get("sessions_on_current_tier", 0) * 12)
@@ -93,7 +91,7 @@ def login():
     return jsonify({"token": result["token"], "user": result["user"]}), 200
 
 
-# ── State endpoint (sidebar refresh) ─────────────────────────────────────────
+# ── State endpoint ────────────────────────────────────────────────────────────
 
 @api.route("/state", methods=["GET"])
 def get_state():
@@ -137,7 +135,7 @@ def start_session():
     session_type = body.get("session_type", "morning")
     if session_type not in ("morning", "evening", "interactive"):
         return jsonify({"error": "Invalid session_type"}), 400
-    return _process_message(user, "(session start — no user message)", session_type)
+    return _process_message(user, "(session start)", session_type)
 
 
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
@@ -166,24 +164,24 @@ def _process_message(user: dict, user_message: str, session_type: str):
         conversation_history=progress["conversation_history"],
     )
 
-    reply_text = cr.get("reply_text", "...")
-    respond_with_voice = cr.get("respond_with_voice", False)
-    audio_phrase = cr.get("audio_phrase")
-    audio_phrase_english = cr.get("audio_phrase_english")
-    new_vocab = cr.get("new_vocab") or []
-    mistakes_detected = cr.get("mistakes_detected") or []
-    topic_override_change = cr.get("topic_override_change")
-    mode_change = cr.get("preferred_response_mode_change")
-    progress_note = cr.get("tier_progress_note", "")
-    tier_advancement_note = cr.get("tier_advancement_note")
-    award_xp = cr.get("award_xp", 10)
+    reply_text       = cr.get("reply_text", "...")
+    audio_phrase     = cr.get("audio_phrase")          # ONLY set by Claude on explicit request
+    audio_phrase_eng = cr.get("audio_phrase_english")
+    new_vocab        = cr.get("new_vocab") or []
+    mistakes         = cr.get("mistakes_detected") or []
+    topic_change     = cr.get("topic_override_change")
+    mode_change      = cr.get("preferred_response_mode_change")  # persistent pref only
+    progress_note    = cr.get("tier_progress_note", "")
+    tier_adv_note    = cr.get("tier_advancement_note")
+    award_xp         = cr.get("award_xp", 10)
 
     # Apply state changes
-    if topic_override_change:
-        progress["topic_override"] = topic_override_change
+    if topic_change:
+        progress["topic_override"] = topic_change
+    # Only change persistent mode on explicit preference change (not one-time voice requests)
     if mode_change in ("text", "voice"):
         progress["preferred_response_mode"] = mode_change
-    for m in mistakes_detected:
+    for m in mistakes:
         if isinstance(m, dict):
             storage.log_mistake(progress, f"{m.get('word','')} → {m.get('correction','')}")
         elif isinstance(m, str):
@@ -198,36 +196,36 @@ def _process_message(user: dict, user_message: str, session_type: str):
                 progress["current_tier"] = next_tier
                 progress["sessions_on_current_tier"] = 0
                 tier_info = TIERS.get(next_tier, {})
-                tier_advancement_note = tier_advancement_note or f"You've advanced to {next_tier}: {tier_info.get('title', '')}!"
+                tier_adv_note = tier_adv_note or f"You've advanced to {next_tier}: {tier_info.get('title', '')}!"
+
     storage.add_xp(progress, award_xp)
     storage.increment_session_count(progress)
+
+    # Save history BEFORE audio (so history is always saved even if TTS fails)
     storage.append_history(progress, "user", user_message)
     storage.append_history(progress, "assistant", reply_text)
     storage.save_progress(user_id, progress)
 
-    # TTS audio (MP3 base64, works in all browsers)
+    # TTS audio — ONLY when Claude explicitly set audio_phrase
+    # Never auto-generate based on preferred_response_mode for the web app
     audio_data = None
-    if audio_phrase or respond_with_voice:
-        phrase = audio_phrase or reply_text
+    if audio_phrase:
         try:
-            audio_data = speech.text_to_speech_mp3_base64(phrase)
+            audio_data = speech.text_to_speech_mp3_base64(audio_phrase)
         except Exception as e:
-            print(f"TTS error: {e}")
+            print(f"[web_api] TTS error: {e}")
 
     tier_code = progress["current_tier"]
     tier_info = TIERS.get(tier_code, {})
 
     return jsonify({
-        # Chat content
         "reply": reply_text,
-        "respond_with_voice": respond_with_voice,
         "audio_phrase": audio_phrase,
-        "audio_phrase_english": audio_phrase_english,
+        "audio_phrase_english": audio_phrase_eng,
         "audio_data": audio_data,
         "new_vocab": new_vocab,
-        "mistakes_detected": mistakes_detected,
-        "tier_advancement_note": tier_advancement_note,
-        # Sidebar state
+        "mistakes_detected": mistakes,
+        "tier_advancement_note": tier_adv_note,
         "current_tier": tier_code,
         "tier_title": tier_info.get("title", tier_code),
         "tier_mastery_score": min(100, progress.get("sessions_on_current_tier", 0) * 12),
@@ -270,12 +268,12 @@ def roadmap():
     tiers = []
     for i, code in enumerate(TIER_ORDER):
         info = TIERS.get(code, {})
-        level = code.split(".")[0]  # "A1", "A2", "B1", "B2"
+        level = code.split(".")[0]
         tiers.append({
             "code": code,
             "title": info.get("title", code),
             "level": level,
-            "vocab_target": len(info.get("vocabulary", [])) * 8 or 50,
+            "vocab_target": max(30, len(info.get("vocabulary", [])) * 8),
             "is_done": i < current_idx,
             "is_current": code == current,
         })
@@ -303,7 +301,7 @@ def transcribe():
     try:
         transcript = speech.speech_to_text_from_bytes(audio_bytes, mime_type)
     except Exception as e:
-        print(f"STT error: {e}")
+        print(f"[web_api] STT error: {e}")
         return jsonify({"error": "Could not transcribe audio."}), 500
     if not transcript.strip():
         return jsonify({"error": "No speech detected — please try again."}), 200
