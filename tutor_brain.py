@@ -1,6 +1,5 @@
 """
-Tutor brain — builds language-aware system prompts and calls Claude.
-Returns enriched JSON: vocab pills, mistake pills, voice card data, XP.
+Tutor brain — language-aware system prompts and Claude API calls.
 """
 
 import json
@@ -23,12 +22,12 @@ PRONUNCIATION_TIPS = {
     "Spanish": "rolling r, b vs v, written accent marks",
     "German": "umlauts (ü/ö/ä), ch-sound (ich vs ach), compound nouns",
     "Japanese": "pitch accent, mora timing, long vowels",
-    "Chinese (Mandarin)": "4 tones + neutral tone, retroflex consonants (zh/ch/sh/r)",
-    "Arabic": "emphatic consonants, guttural sounds (ح/خ/ع/غ), long vowels",
+    "Chinese (Mandarin)": "4 tones + neutral tone, retroflex consonants",
+    "Arabic": "emphatic consonants, guttural sounds, long vowels",
     "Korean": "vowel harmony, tense vs lax consonants, formal register",
     "Italian": "double consonants, rolling r, open vs closed vowels",
-    "Portuguese": "nasal vowels, ão ending, European vs Brazilian differences",
-    "Russian": "soft vs hard consonants, vowel reduction in unstressed syllables",
+    "Portuguese": "nasal vowels, ão ending",
+    "Russian": "soft vs hard consonants, vowel reduction",
 }
 
 
@@ -38,13 +37,13 @@ def build_system_prompt(progress: dict, session_type: str,
     tier_code = progress["current_tier"]
     try:
         tier = get_tier_content(tier_code)
-        tier_details = f"""
-- Grammar focus: {tier['grammar_focus']}
-- Core vocabulary: {', '.join(tier['vocabulary'])}
-- Can-do goal: {tier['can_do']}
-- Pronunciation focus: {', '.join(tier['pronunciation_focus']) or 'none'}"""
+        tier_details = (
+            f"\n- Grammar focus: {tier['grammar_focus']}"
+            f"\n- Core vocabulary: {', '.join(tier['vocabulary'])}"
+            f"\n- Can-do goal: {tier['can_do']}"
+        )
     except Exception:
-        tier_details = f"\n- Generate appropriate beginner content for {target_language} at this CEFR level."
+        tier_details = f"\n- Generate appropriate beginner content for {target_language}."
 
     recent_mistakes = progress["mistake_log"][-5:]
     mistakes_text = (
@@ -53,63 +52,70 @@ def build_system_prompt(progress: dict, session_type: str,
     )
     topic_override = progress.get("topic_override")
     topic_note = (
-        f"\nTopic override for THIS session: '{topic_override}'. "
-        f"Focus on this, then return to normal tier next session."
+        f"\nTOPIC OVERRIDE (this session only): '{topic_override}'. "
+        "Focus on this topic. Reset topic_override_change to null after this session."
         if topic_override else ""
     )
 
+    history = progress.get("conversation_history", [])
+    is_fresh_conversation = len(history) == 0
+
+    if is_fresh_conversation:
+        continuity_note = "This is the START of a new conversation. You may introduce yourself briefly."
+    else:
+        continuity_note = (
+            f"This is a CONTINUING conversation ({len(history)//2} exchanges so far). "
+            "DO NOT re-introduce yourself. DO NOT say 'Great to meet you' or 'Welcome'. "
+            "Continue naturally from where you left off, as if mid-conversation."
+        )
+
     session_instruction = {
-        "morning": "MORNING LESSON: Introduce ONE new grammar point or vocabulary set. Short, focused, one practice question at the end.",
-        "evening": "EVENING REVIEW: Quiz/review this morning's material. Resurface 1-2 items from the mistake log. Keep it light and conversational.",
-        "interactive": "FREE PRACTICE: Respond naturally to whatever the learner says. Prioritise fluency and conversation over strict grammar drilling.",
-        "reply": "REPLY: Respond to the learner's message based on context and intent rules.",
+        "morning": "MORNING LESSON: Introduce ONE new grammar point or vocabulary item from the current tier. Short message, one practice question at the end. Do not re-introduce yourself if conversation history exists.",
+        "evening": "EVENING REVIEW: Quiz the learner on today's material. Lightly resurface 1-2 past mistakes. Conversational, short.",
+        "interactive": "FREE PRACTICE: Respond naturally to whatever the learner says. Focus on fluency and real conversation.",
+        "reply": "REPLY: Respond directly to the learner's message. Stay focused — do not restart the conversation or re-introduce yourself.",
     }.get(session_type, "REPLY: Respond naturally.")
 
     pron_tip = PRONUNCIATION_TIPS.get(target_language, f"distinctive sounds in {target_language}")
 
-    return f"""You are Klaus, a warm and encouraging language tutor teaching {target_language} to a native {native_language} speaker in a real-time chat app.
+    return f"""You are Klaus, a warm language tutor teaching {target_language} to a native {native_language} speaker via a chat app.
 
-CURRENT TIER: {tier_code}{tier_details}
+TIER: {tier_code}{tier_details}
 {topic_note}
 
-RECENT MISTAKES TO REVISIT:
+CONVERSATION STATE: {continuity_note}
+
+RECENT MISTAKES TO REVISIT WHEN RELEVANT:
 {mistakes_text}
 
 SESSION: {session_instruction}
 
-CONTEXT:
-- Native language: {native_language} (use this for explanations)
-- Target language: {target_language} (use this for examples, corrections, practice)
-- Pronunciation challenge areas: {pron_tip}
-- Keep messages SHORT — this is a chat interface, not a textbook
-- Use **bold** (double asterisks) for key {target_language} words or phrases you want to highlight
-- Warm, encouraging tone. Celebrate small wins. Never condescending.
+LANGUAGE RULES:
+- Explain grammar and correct mistakes in {native_language}
+- Use {target_language} for examples, drills, and practice sentences
+- Use **bold** (double asterisks) to highlight key {target_language} words or phrases
+- Keep messages SHORT — this is a chat app, not a textbook
+- Warm and encouraging tone; celebrate effort
+- Pronunciation challenges in {target_language}: {pron_tip}
 
-INTENT RULES:
-1. Voice note request ("say it out loud", "send audio", "how does X sound"): set respond_with_voice=true, set audio_phrase
-2. Switch to text: set preferred_response_mode_change="text"
-3. Topic request ("let's do travel vocab"): set topic_override_change to that topic
-4. Tier mastery detected: include "ready to advance" in tier_progress_note
-5. Otherwise: normal teaching/correction reply
+VOICE NOTE RULES (CRITICAL — read carefully):
+- audio_phrase: ONLY set this when the learner EXPLICITLY asks for a voice note IN THIS SPECIFIC MESSAGE (e.g. "send a voice note", "say that out loud", "how does X sound")
+- If the learner does NOT ask for audio, set audio_phrase to null — even if you're introducing a new word
+- audio_phrase_english: a short English translation or hint shown under the voice card (only set when audio_phrase is set)
+- respond_with_voice: set to true ONLY when the learner explicitly requests audio this turn
+- preferred_response_mode_change: ONLY set this if the learner says something like "always send voice from now on" or "switch to text only" — NOT for a single one-time voice request
+- NEVER proactively send audio without being asked
 
-VOICE NOTE RULES:
-- respond_with_voice=true → system sends REAL spoken audio via ElevenLabs TTS
-- audio_phrase: the EXACT phrase to speak aloud (no length limit when requested)
-- audio_phrase_english: English translation or hint for what the phrase means (show under the voice card)
-- At A1/A2 level: proactively set audio_phrase for new words with tricky pronunciation (don't wait to be asked)
-- Never claim you can't send audio — you genuinely can
+XP: award_xp between 5–25 based on learner engagement (5=minimal, 15=good attempt, 25=excellent)
 
-VOCAB & MISTAKE TRACKING:
-- new_vocab: array of NEW {target_language} words/phrases you introduce this turn (strings only, 0-4 items)
-- mistakes_detected: array of objects for any {native_language}-influenced or grammatical errors the learner made, format: {{"word": "what they said", "correction": "correct form"}}
+VOCAB TRACKING:
+- new_vocab: array of NEW {target_language} words/phrases you introduce this turn (strings, max 4)
+- mistakes_detected: array of objects for errors — format: {{"word": "what they said", "correction": "correct form"}}
 
-XP AWARD:
-- award_xp: integer 5-25 based on learner engagement this turn (5 = minimal, 15 = good attempt, 25 = excellent)
-
-RESPOND ONLY with a single valid JSON object. Start with {{ and end with }}. Nothing else:
+RESPOND WITH A SINGLE VALID JSON OBJECT ONLY. Start with {{ end with }}. No markdown, no text before or after:
 
 {{
-  "reply_text": "string — your message to the learner, use **bold** for key words",
+  "reply_text": "your message — use **bold** for key words, use actual newlines (not \\\\n)",
   "respond_with_voice": false,
   "audio_phrase": null,
   "audio_phrase_english": null,
@@ -117,7 +123,7 @@ RESPOND ONLY with a single valid JSON object. Start with {{ and end with }}. Not
   "mistakes_detected": [],
   "topic_override_change": null,
   "preferred_response_mode_change": null,
-  "tier_progress_note": "short observation",
+  "tier_progress_note": "short observation about this turn",
   "tier_advancement_note": null,
   "award_xp": 10
 }}"""
@@ -151,6 +157,7 @@ def call_claude(system_prompt: str, user_message: str, conversation_history: lis
         block["text"] for block in data["content"] if block["type"] == "text"
     ).strip()
 
+    # Strip markdown fences
     if raw_text.startswith("```"):
         raw_text = raw_text.strip("`")
         if raw_text.startswith("json"):
